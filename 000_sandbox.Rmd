@@ -1,0 +1,126 @@
+---
+title: "A Generalized Framework for Covariate Adjustment with Machine-Learners"
+author: "Miles D. Williams"
+date: "7/2/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r}
+library(tidyverse)
+library(lmtest)
+library(sandwich)
+library(randomForest)
+library(e1071)
+library(robustbase)
+```
+
+
+```{r}
+# matrix of covariates
+X = matrix(0,nrow=2000,ncol=20)
+X = apply(X,2,function(x)rnorm(n=length(x),mean=runif(1,20,100),sd=runif(1,1,5)))
+X = cbind(1,X)
+
+# dgp
+bb  = runif(ncol(X),-5,5) # model parameters
+gg  = runif(ncol(X),-5,5) # correlation with treatment
+tr  = rbinom(nrow(X),1,pnorm(scale(X%*%gg))) # treatment assitment
+ate = runif(1,-5,5) # the ATE
+y0  = rnorm(nrow(X),X%*%bb) # response under control
+y1  = y0 + ate # response under treatment
+y   = tr*y1 + (1-tr)*y0 # observed response
+  
+# put in dataframe
+as_tibble(X) %>%
+  mutate(
+    tr=tr,
+    y0=y0,
+    y1=y1,
+    y=y,
+    ate=ate
+  ) -> df
+
+# show data
+df
+```
+
+
+```{r}
+# comparison of true vs. unadjusted ATE
+df %>%
+  summarize(
+    true_ate = mean(y1 - y0),
+    unad_ate = mean(y[tr==1]) - mean(y[tr==0])
+  )
+```
+
+```{r}
+# parametric covariate adjustment
+standard_fit = lm(y ~ . - ate - y1 - y0 - V1, df)
+
+# random forest adjustment
+yhat = predict(
+  randomForest(
+    y ~ . - ate - y1 - y0 - tr - V1,
+    data = df
+  )
+)
+that = predict(
+  suppressWarnings(
+    randomForest(
+      tr ~ . - ate - y1 - y0 - y - V1,
+      data = df
+    )
+  )
+)
+
+rfa_fit = lm(y - yhat ~ tr, df %>% mutate(tr = tr - that))
+
+# compare
+cbind(
+  'true ATE' = ate,
+  'standard ATE' = coef(standard_fit)['tr'],
+  'RFA ATE' = coef(rfa_fit)['tr']
+)
+```
+
+```{r}
+# find ntree that optimizes fit
+ntree = c(500,1000,5000,10000,20000)
+models = list()
+R2 = 0
+for(i in 1:length(ntree)) {
+  
+  if(i==1) cat('Running....\n')
+  models[[i]] = randomForest(
+    y ~ . - ate - y1 - y0 - tr - V1,
+    data = df,
+    ntree = ntree[i]
+  )
+  R2[i] = cor(predict(models[[i]]),df$y)^2
+  cat('Done with run',i,'of',length(ntree),paste0(rep('.',len=i)),'\n')
+  if(i==length(ntree)) cat('Done!')
+}
+```
+
+```{r}
+ggplot() + 
+  aes(
+    ntree,
+    R2
+  ) +
+  scale_x_log10() +
+  geom_line() +
+  geom_point() +
+  labs(
+    x = 'N-trees',
+    y = 'OOB R-squared'
+  )
+```
+
